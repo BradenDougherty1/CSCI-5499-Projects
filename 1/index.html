@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Pretrained ViT and CLIP on a 20-Image Collection</title>
+    <style>
+        @page {
+          size: letter;
+          margin: 0.75in 0.8in 0.7in 0.8in;
+          @bottom-center {
+            content: counter(page);
+            font-family: "Times New Roman", Times, serif;
+            font-size: 9.5pt;
+          }
+        }
+        html, body {
+          margin: 0;
+          padding: 0;
+          background: #fff;
+          color: #111;
+          font: 10.8pt/1.32 "Times New Roman", Times, serif;
+        }
+        header.titlepage {
+          text-align: center;
+          margin: 0 0 0.6em 0;
+          border-bottom: 1px solid #222;
+          padding-bottom: 0.5em;
+        }
+        h1 {
+          font-size: 16.5pt;
+          font-weight: 700;
+          line-height: 1.2;
+          margin: 0 0 0.35em 0;
+        }
+        .meta {
+          font-size: 11pt;
+          margin: 0.15em 0;
+        }
+        .subtitle {
+          font-style: italic;
+          margin-top: 0.25em;
+        }
+        h2 {
+          font-size: 12.2pt;
+          margin: 0.85em 0 0.28em 0;
+          border-bottom: 0.6pt solid #444;
+          padding-bottom: 0.1em;
+          page-break-after: avoid;
+        }
+        h2.closer { page-break-before: always; }
+        h3 {
+          font-size: 11pt;
+          margin: 0.65em 0 0.2em 0;
+          page-break-after: avoid;
+        }
+        p { margin: 0 0 0.42em 0; text-align: justify; hyphens: auto; }
+        ul { margin: 0.2em 0 0.55em 1.2em; padding: 0; }
+        li { margin: 0.12em 0; }
+        code, .mono {
+          font-family: "Cambria Math", "Times New Roman", Times, serif;
+          font-size: 10.4pt;
+        }
+        figure {
+          margin: 0.4em 0 0.5em 0;
+          text-align: center;
+          page-break-inside: avoid;
+        }
+        figure img {
+          max-width: 100%;
+          height: auto;
+          display: block;
+          margin: 0 auto;
+        }
+        figure.wide img { max-height: 2.35in; }
+        figure.square img { max-height: 2.55in; }
+        figcaption {
+          font-size: 10pt;
+          line-height: 1.28;
+          margin-top: 0.28em;
+          text-align: justify;
+        }
+        table {
+          border-collapse: collapse;
+          width: 100%;
+          margin: 0.4em 0 0.7em 0;
+          font-size: 9.6pt;
+          page-break-inside: avoid;
+        }
+        caption {
+          caption-side: top;
+          text-align: left;
+          font-size: 10pt;
+          margin-bottom: 0.25em;
+          font-style: italic;
+        }
+        th, td {
+          border: 0.6pt solid #555;
+          padding: 0.18em 0.35em;
+          vertical-align: top;
+        }
+        th { background: #f0f0f0; font-weight: 700; text-align: left; }
+        td.num, th.num { text-align: right; }
+        .refs p { margin: 0 0 0.28em 1.3em; text-indent: -1.3em; font-size: 10pt; }
+        .note { font-size: 10pt; }
+    </style>
+</head>
+<body>
+
+<header class="titlepage">
+    <h1>Pretrained ViT and CLIP on a 20-Image Collection</h1>
+    <p class="meta">Braden Dougherty</p>
+    <p class="meta">Project 1 &mdash; Pretrained Vision Transformer and CLIP</p>
+    <p class="meta subtitle">Frozen ImageNet classification versus frozen image&ndash;text matching</p>
+</header>
+
+<h2>1. Introduction</h2>
+<p>
+    This report studies two frozen pretrained vision models on the same 20-image collection.
+    Part&nbsp;1 uses torchvision&rsquo;s ViT-B/16 checkpoint
+    <code>ViT_B_16_Weights.IMAGENET1K_V1</code> for 1000-way ImageNet classification
+    and walks through how the model turns a 224&times;224 image into a token sequence.
+    Part&nbsp;2 uses OpenAI CLIP ViT-B/32 for image&ndash;text matching, prompt wording,
+    and image&ndash;image similarity. Weights stay frozen in both parts; the work is
+    inference and interpretation, not training.
+</p>
+<p>
+    The two models answer different questions. ViT-B/16 must pick one of ImageNet&rsquo;s
+    1000 nouns. CLIP compares an image to a short list of text strings in a shared
+    embedding space. That difference, not a generic claim that one architecture is
+    better, is the main result of the collection.
+</p>
+
+<h2>2. Dataset</h2>
+<p>
+    Five categories were chosen because each is an exact ImageNet-1K class name:
+    golden retriever (207), tabby (281), airliner (404), school bus (779), and
+    pizza (963). Four Wikimedia Commons photographs were collected for each class
+    (20 images total) and stored under <code>images/&lt;category&gt;/</code>. Every file
+    is Creative Commons, CC0, or public domain; no non-free Wikimedia files are used.
+    Part&nbsp;1 scores a prediction as correct only when the top-1 synset matches the
+    recorded ImageNet index. A nearby label such as Labrador retriever for a golden
+    retriever counts as wrong. Predictions outside the five chosen classes are
+    placed in an <em>other</em> column of the confusion matrix. Part&nbsp;2 instead
+    asks CLIP to choose among the five category names (or a prompted rewrite of those
+    names) and cannot emit off-list ImageNet nouns.
+</p>
+
+<h2>3. Part 1: Pretrained ViT-B/16</h2>
+
+<h3>3.1 Patches, projection, and the CLS token</h3>
+<p>
+    ViT-B/16 tokenizes a 224&times;224 image as a grid of non-overlapping 16&times;16
+    patches. That grid is
+</p>
+<p style="text-align:center; margin: 0.25em 0 0.45em 0;">
+    (224/16)&nbsp;&times;&nbsp;(224/16)&nbsp;=&nbsp;14&nbsp;&times;&nbsp;14&nbsp;=&nbsp;196 patches.
+</p>
+<p>
+    A learned CLS token is prepended, so the transformer sequence length is 197.
+    This matches the checkpoint: <code>encoder.pos_embedding</code> has shape
+    (1,&nbsp;197,&nbsp;768). Figure&nbsp;1 shows the raw pixel tiles on
+    <code>golden_retriever_01.jpg</code>. Those tiles are still RGB; they are not
+    the model&rsquo;s tokens.
+</p>
+<p>
+    The transformer never reads the raw tiles. Each 16&times;16&times;3 patch is
+    mapped to a 768-dimensional embedding. Flattening a patch already gives
+    16&times;16&times;3&nbsp;=&nbsp;768 numbers; a learned linear map with bias then
+    produces the token. In this checkpoint that map is
+    <code>model.conv_proj</code>, a <code>Conv2d(3,&nbsp;768,&nbsp;kernel=16,&nbsp;stride=16)</code>.
+    Convolution with kernel equal to stride equal to patch size is the same as
+    extracting non-overlapping patches and multiplying each by the same weight
+    matrix. Self-attention has no built-in grid location, so a learned table of 197
+    vectors is added after the CLS token is prepended. The classification head
+    <code>model.heads</code> is a linear layer from 768 to 1000 that reads only the
+    final CLS representation. The CLS token is a learnable aggregation query for
+    the whole image, not a mean pool of patch tokens.
+</p>
+
+<figure class="wide">
+    <img src="figures/fig1_patches.png" alt="Raw 14 by 14 patch mosaic of a golden retriever">
+    <figcaption>
+        <strong>Figure 1.</strong>
+        Task 1 patch visualization for <code>golden_retriever_01.jpg</code>.
+        Left: the image resized to 224&times;224. Right: the same image cut into a
+        14&times;14 grid of non-overlapping 16&times;16 RGB tiles. The tennis ball
+        in front of the dog is visible in both panels and later splits the
+        classifier&rsquo;s probability mass.
+    </figcaption>
+</figure>
+
+<h3>3.2 Exact-class predictions</h3>
+<p>
+    Each image is passed through the checkpoint&rsquo;s official preprocessing
+    (resize to 256, center crop 224, ImageNet mean and standard deviation) and the
+    frozen model. Top-1 accuracy on this collection is <strong>16/20 = 80.0%</strong>
+    under exact ImageNet-index matching. Per-class counts are 4/4 golden retriever,
+    2/4 tabby, 4/4 airliner, 2/4 school bus, and 4/4 pizza. There is no
+    cross-confusion among the five target classes. All four errors go to
+    <em>other</em> (Figure&nbsp;2): Egyptian cat, tiger cat, folding chair, and
+    minibus.
+</p>
+
+<figure class="square">
+    <img src="figures/fig2_confusion.png" alt="Part 1 confusion matrix">
+    <figcaption>
+        <strong>Figure 2.</strong>
+        Part 1 confusion matrix. Rows are true ImageNet classes; the extra
+        <em>other</em> column collects any top-1 label outside the five chosen
+        synsets. The four misses are two tabbies and two school buses.
+    </figcaption>
+</figure>
+
+<p>
+    Table&nbsp;1 lists the cases used in the discussion. Canonical close-ups are
+    peaked on the right synset: <code>pizza_01.jpg</code> is pizza at 0.901 with
+    almost no residual mass, and the two yellow North-American buses
+    (<code>school_bus_01</code>, <code>_02</code>) are school bus at 0.900 and
+    0.899. Airliners land between 0.81 and 0.89, usually with <em>wing</em> as the
+    runner-up. When the object is large, centered, and looks like ImageNet training
+    photos, the CLS representation is peaked on the correct class.
+</p>
+
+<table>
+    <caption>Table 1. Selected ViT-B/16 top-5 predictions. Exact? is an ImageNet-index match.</caption>
+    <thead>
+    <tr>
+        <th>Image</th>
+        <th>True class</th>
+        <th>Exact?</th>
+        <th>Top-1</th>
+        <th>Top-2</th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr>
+        <td>golden_retriever_01</td>
+        <td>golden retriever</td>
+        <td>yes</td>
+        <td>golden retriever 0.561</td>
+        <td>tennis ball 0.341</td>
+    </tr>
+    <tr>
+        <td>pizza_01</td>
+        <td>pizza</td>
+        <td>yes</td>
+        <td>pizza 0.901</td>
+        <td>broccoli ~0.000</td>
+    </tr>
+    <tr>
+        <td>school_bus_01</td>
+        <td>school bus</td>
+        <td>yes</td>
+        <td>school bus 0.900</td>
+        <td>traffic light ~0.000</td>
+    </tr>
+    <tr>
+        <td>tabby_01</td>
+        <td>tabby</td>
+        <td>no</td>
+        <td>Egyptian cat 0.674</td>
+        <td>tabby 0.119</td>
+    </tr>
+    <tr>
+        <td>tabby_02</td>
+        <td>tabby</td>
+        <td>no</td>
+        <td>tiger cat 0.715</td>
+        <td>tabby 0.142</td>
+    </tr>
+    <tr>
+        <td>school_bus_03</td>
+        <td>school bus</td>
+        <td>no</td>
+        <td>folding chair 0.114</td>
+        <td>pier 0.086</td>
+    </tr>
+    <tr>
+        <td>school_bus_04</td>
+        <td>school bus</td>
+        <td>no</td>
+        <td>minibus 0.902</td>
+        <td>school bus 0.014</td>
+    </tr>
+    </tbody>
+</table>
+
+<h3>3.3 What the closed 1000-way vocabulary can and cannot say</h3>
+<p>
+    Three error types appear, and they are not the same failure.
+</p>
+<p>
+    <strong>Split objects.</strong>
+    <code>golden_retriever_01.jpg</code> is counted correct, but the mass is split
+    between golden retriever (0.561) and tennis ball (0.341). Both objects are in
+    the crop (Figure&nbsp;1). The head cannot say &ldquo;dog and tennis ball&rdquo;;
+    it can only rank ImageNet nouns. The same photograph later shows this limit
+    again in CLIP when a tennis-ball prompt is added to the candidate set.
+</p>
+<p>
+    <strong>Fine-grained label collisions.</strong>
+    ImageNet has three overlapping striped-cat synsets: tabby (281), tiger cat (282),
+    and Egyptian cat (285). <code>tabby_02.jpg</code> is a confident cat prediction
+    that prefers tiger cat (0.715) with tabby only at 0.142.
+    <code>tabby_01.jpg</code> prefers Egyptian cat (0.674) with tabby at 0.119.
+    These are collisions among nearby labels, not failures to recognize a cat.
+</p>
+<p>
+    <strong>Domain shift and a bad crop.</strong>
+    <code>school_bus_04.jpg</code> is a non-yellow Hong Kong coach. The model is
+    very sure it is a minibus (0.902); school bus is only 0.014. The role is school
+    transportation, but the appearance matches a different ImageNet category.
+    <code>school_bus_03.jpg</code> is different: top-1 is folding chair at only
+    0.114, then pier, shopping cart, and park bench. Confidence is low and the
+    labels are scene furniture, which is what happens when the center crop misses
+    the buses (distant vehicles, a lot of pavement and structure). Unlike the
+    minibus mistake, the model is not committed to any vehicle class.
+</p>
+<p>
+    The model is forced to answer &ldquo;which of these 1000 nouns is most
+    likely?&rdquo; That is the question ImageNet training asked. Nearby but distinct
+    synsets count as incorrect under exact-match scoring, and the output vocabulary
+    cannot describe a scene that is not one of those nouns. Most of the misses in
+    this collection come from that closed set, plus the unresolved
+    <code>school_bus_03</code> crop.
+</p>
+
+<h2>4. Part 2: CLIP ViT-B/32</h2>
+
+<h3>4.1 Cosine similarity, logit scale, and softmax</h3>
+<p>
+    CLIP encodes each image and each candidate text into the same 512-dimensional
+    space. Matching is cosine similarity of L2-normalized vectors, scaled by a
+    learned temperature, then softmaxed over the texts that were passed in. On this
+    run, <code>exp(logit_scale)</code> is 100.000, so logits are essentially
+    100&nbsp;&times;&nbsp;cosine. Encoded features have shape (20,&nbsp;512) for
+    images and (5,&nbsp;512) for the prompts
+    <code>a photo of a {category}</code>. Cosines on that 20&times;5 matrix range
+    from 0.149 to 0.333; logits range from 14.89 to 33.29; every softmax row sums
+    to 1.
+</p>
+<p>
+    The custom implementation matches CLIP&rsquo;s built-in
+    <code>model(images, texts)</code> forward pass: the maximum absolute logit
+    difference is 1.34&times;10<sup>&minus;5</sup>, and predicted labels agree on
+    all 20 images. Cosine only scores alignment. The temperature stretches the
+    range so softmax is neither too flat nor too peaky; it does not change which
+    text wins <code>argmax</code>. Softmax is a distribution over the current
+    candidate set, not a calibrated probability that the object exists in the
+    world. Adding, dropping, or rewording a candidate can change every probability
+    on the row even though the image embedding is unchanged.
+</p>
+<p>
+    That last point is visible on <code>golden_retriever_01.jpg</code>, the same
+    photo as Figure&nbsp;1. Against the five category prompts, golden retriever
+    receives softmax 1.000. After adding <code>a photo of a tennis ball</code>,
+    the six-way row becomes 0.113 for golden retriever and 0.887 for tennis ball.
+    Part&nbsp;1&rsquo;s 0.561/0.341 split and Part&nbsp;2&rsquo;s 0.113/0.887 flip
+    are the same photograph under two closed vocabularies.
+</p>
+
+<figure class="square">
+    <img src="figures/fig3_clip_text.png" alt="CLIP 5 by 5 image-text cosine heatmap">
+    <figcaption>
+        <strong>Figure 3.</strong>
+        CLIP cosine similarity for one image per category against the five prompts
+        <code>a photo of a {category}</code>. The diagonal is the brightest cell
+        in every row. The strongest match is <code>school_bus_01</code> versus
+        school bus (0.32); the weakest on-diagonal is airliner (0.27).
+    </figcaption>
+</figure>
+
+<h3>4.2 Prompt wording</h3>
+<p>
+    Three templates were compared with the same frozen weights and the same five
+    category names: the bare name <code>{category}</code>,
+    <code>a photo of a {category}</code>, and
+    <code>an image showing a {category}</code>. All three score
+    <strong>20/20 = 100%</strong>. No image changes predicted class when the
+    wording changes, and each confusion matrix is a perfect 5&times;5 identity
+    (4 correct per class). On a 5-way closed set of visually distinct objects, the
+    image embedding already sits nearest the right category name. Wrapping that
+    name in a short sentence mostly rescales the softmax, not the argmax.
+</p>
+
+<table>
+    <caption>Table 2. Prompt templates. Wording never changes the predicted class.</caption>
+    <thead>
+    <tr>
+        <th>Template</th>
+        <th class="num">Accuracy</th>
+        <th>Largest confidence move (class unchanged)</th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr>
+        <td><code>{category}</code></td>
+        <td class="num">20/20 = 100%</td>
+        <td rowspan="3">school_bus_03: 0.950 &rarr; 0.975 &rarr; 0.976</td>
+    </tr>
+    <tr>
+        <td><code>a photo of a {category}</code></td>
+        <td class="num">20/20 = 100%</td>
+    </tr>
+    <tr>
+        <td><code>an image showing a {category}</code></td>
+        <td class="num">20/20 = 100%</td>
+    </tr>
+    </tbody>
+</table>
+
+<p>
+    Wording still moves the winning score. The largest shift is
+    <code>school_bus_03.jpg</code> (the distant buses that Part&nbsp;1 called
+    folding chair): 0.950 with the bare name, 0.975 with
+    <code>a photo of a &hellip;</code>, and 0.976 with
+    <code>an image showing a &hellip;</code>. Several tabbies move by about 0.01.
+    Canonical close-ups such as <code>pizza_01</code> and
+    <code>school_bus_01</code> stay at 1.000 for every template.
+</p>
+<p>
+    Prompting and fine-tuning are different operations. All three runs use the
+    same frozen ViT-B/32 weights. Changing the template only changes the text
+    tokens, so the text encoder emits a different vector. Fine-tuning would update
+    image-encoder, text-encoder, or logit-scale parameters on new paired data.
+    Prompting is inference-time control of the query; fine-tuning is a change to
+    the model itself.
+</p>
+
+<h3>4.3 Image&ndash;image representation space</h3>
+<p>
+    The same L2-normalized CLIP image embeddings can be compared to one another.
+    Figure&nbsp;4 shows the 20&times;20 cosine matrix with rows and columns grouped
+    by the Part&nbsp;1 categories. Every category has a higher mean intra-class
+    cosine than its mean cosine to the other classes (Table&nbsp;3). Tabby is the
+    tightest block (0.821 vs 0.529). Golden retriever and pizza both sit at 0.797
+    intra-class. School buses are the loosest block (0.612 vs 0.447): the set mixes
+    two canonical yellow U.S. buses with a distant group shot
+    (<code>school_bus_03</code>) and a non-yellow Hong Kong coach
+    (<code>school_bus_04</code>).
+</p>
+
+<table>
+    <caption>Table 3. Mean off-diagonal CLIP image&ndash;image cosine, grouped by category.</caption>
+    <thead>
+    <tr>
+        <th>Category</th>
+        <th class="num">Intra-class</th>
+        <th class="num">Inter-class</th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr><td>golden retriever</td><td class="num">0.797</td><td class="num">0.492</td></tr>
+    <tr><td>tabby</td><td class="num">0.821</td><td class="num">0.529</td></tr>
+    <tr><td>airliner</td><td class="num">0.707</td><td class="num">0.437</td></tr>
+    <tr><td>school bus</td><td class="num">0.612</td><td class="num">0.447</td></tr>
+    <tr><td>pizza</td><td class="num">0.797</td><td class="num">0.473</td></tr>
+    </tbody>
+</table>
+
+<p>
+    The strongest pairs are within class and driven by the main object:
+    <code>school_bus_01</code>&ndash;<code>school_bus_02</code> at 0.904 (both long
+    yellow buses), two golden-retriever portraits at 0.891, and several tabby pairs
+    around 0.83&ndash;0.88. The unexpected cross-category neighbors are all golden
+    retriever &harr; tabby (0.70&ndash;0.74), not bus&ndash;pizza or dog&ndash;plane.
+    Those photographs are close-up furry animals with warm coats on simple
+    backgrounds. CLIP is picking up species-adjacent appearance and color. The
+    weaker school-bus block is the counterpart: once the main object no longer
+    looks like the others, intra-class cosine drops even though the label is the
+    same.
+</p>
+
+<figure class="square">
+    <img src="figures/fig4_clip_image.png" alt="CLIP 20 by 20 image-image cosine heatmap">
+    <figcaption>
+        <strong>Figure 4.</strong>
+        CLIP image&ndash;image cosine, ordered golden retriever, tabby, airliner,
+        school bus, pizza. Bright 4&times;4 diagonal blocks are same-class
+        neighbors. The school-bus block is the weakest and most uneven. A moderate
+        band between golden retriever and tabby matches the 0.70&ndash;0.74
+        animal pairs. Airliner and pizza are dark against almost every other class.
+    </figcaption>
+</figure>
+
+<p>
+    On this collection, CLIP&rsquo;s image vectors mostly track the main object and
+    how it is framed. Images of the same class that look alike sit close together.
+    When the objects do not look as similar, as with the other bus photographs,
+    the intra-class cosine weakens. The representation is visual, not a lookup of
+    the folder name.
+</p>
+
+<h2 class="closer">5. Comparison and conclusion</h2>
+<p>
+    Part&nbsp;1&rsquo;s ViT-B/16 was trained with 1000-way ImageNet cross-entropy
+    and is scored here as an exact synset match (16/20 = 80%). CLIP was trained
+    with a contrastive image&ndash;text objective, and in Part&nbsp;2 it may only
+    pick among five strings. It cannot emit Part&nbsp;1&rsquo;s off-list labels
+    (Egyptian cat, tiger cat, minibus, folding chair), which is why
+    <code>tabby_01</code>, <code>tabby_02</code>, <code>school_bus_03</code>, and
+    <code>school_bus_04</code> all become correct under CLIP. That is a different
+    task, not evidence that CLIP is generally better.
+</p>
+<p>
+    The same 20 photographs make the difference concrete. A closed 1000-way
+    classifier is brittle to nearby synsets, domain shift, and crops that miss the
+    object, and it cannot report two objects at once. A frozen image&ndash;text
+    model can rephrase the question at inference time, but its softmax is only
+    relative to the texts you supply, and its image space groups photos by
+    appearance and framing rather than by the label string. Prompt wording on this
+    easy 5-way set changed confidence, not identity. Fine-tuning would be required
+    to change the model itself.
+</p>
+
+<h2>References</h2>
+<div class="refs">
+    <p>Dosovitskiy, A., et al. (2021). An image is worth 16&times;16 words: Transformers for image recognition at scale. <em>ICLR</em>.</p>
+    <p>Radford, A., et al. (2021). Learning transferable visual models from natural language supervision. <em>ICML</em>.</p>
+    <p>Wikimedia Commons. Twenty photographs reused under the CC, CC0, or public-domain licenses listed on each file page.</p>
+</div>
+
+</body>
+</html>
