@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Learning Visible 2D Flow Matching</title>
+    <script>
+        MathJax = {
+          tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] }
+        };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+    <style>
+        :root {
+          --text: #1a1a1a;
+          --muted: #444;
+          --rule: #ccc;
+          --bg: #fff;
+        }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0;
+          background: var(--bg);
+          color: var(--text);
+          font: 16px/1.55 "Georgia", "Times New Roman", serif;
+        }
+        main {
+          max-width: 48rem;
+          margin: 0 auto;
+          padding: 2.5rem 1.25rem 4rem;
+        }
+        h1 {
+          font-size: 1.85rem;
+          font-weight: 700;
+          line-height: 1.25;
+          margin: 0 0 0.35rem;
+        }
+        .subtitle {
+          font-size: 1.25rem;
+          margin: 0 0 1rem;
+          font-weight: 400;
+        }
+        .meta {
+          color: var(--muted);
+          margin: 0 0 1.75rem;
+          padding-bottom: 1.25rem;
+          border-bottom: 1px solid var(--rule);
+        }
+        h2 {
+          font-size: 1.35rem;
+          margin: 2.25rem 0 0.75rem;
+          padding-top: 0.5rem;
+          border-top: 1px solid var(--rule);
+        }
+        h3 {
+          font-size: 1.1rem;
+          margin: 1.5rem 0 0.5rem;
+        }
+        p, li { margin: 0.65rem 0; }
+        ul { padding-left: 1.35rem; }
+        code {
+          font-family: "Consolas", "Menlo", monospace;
+          font-size: 0.9em;
+          background: #f3f3f3;
+          padding: 0.1em 0.3em;
+          border-radius: 3px;
+        }
+        .abstract {
+          margin: 0 0 1.5rem;
+          padding: 0.9rem 1rem;
+          background: #f7f7f7;
+          border-left: 3px solid #888;
+        }
+        .abstract .label {
+          font-weight: 700;
+          display: block;
+          margin-bottom: 0.35rem;
+        }
+        figure {
+          margin: 1.25rem 0;
+          text-align: center;
+        }
+        figure img {
+          max-width: 100%;
+          height: auto;
+          vertical-align: middle;
+        }
+        figure.narrow img { max-width: 70%; }
+        figure.half img { max-width: 55%; }
+        .row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.5rem;
+          justify-content: center;
+          align-items: flex-start;
+        }
+        .row img {
+          max-width: calc(33.33% - 0.4rem);
+          flex: 1 1 160px;
+        }
+        figcaption {
+          margin-top: 0.45rem;
+          font-size: 0.92rem;
+          color: var(--muted);
+          text-align: center;
+        }
+        table {
+          width: 100%;
+          border-collapse: collapse;
+          margin: 0.75rem 0 0.25rem;
+          font-size: 0.95rem;
+        }
+        th, td {
+          border-bottom: 1px solid var(--rule);
+          padding: 0.4rem 0.55rem;
+          text-align: right;
+        }
+        th:first-child, td:first-child { text-align: left; }
+        th { border-bottom: 2px solid #999; }
+        .table-wrap { margin: 1.1rem 0 1.4rem; overflow-x: auto; }
+        .table-caption {
+          font-size: 0.92rem;
+          color: var(--muted);
+          margin-top: 0.35rem;
+          text-align: center;
+        }
+        @media print {
+          body { font-size: 11pt; }
+          main { max-width: none; padding: 0; }
+          h2 { break-after: avoid; }
+          figure, .table-wrap { break-inside: avoid; }
+          a[href]::after { content: ""; }
+        }
+    </style>
+</head>
+<body>
+<main>
+    <h1>Learning Visible 2D Flow Matching</h1>
+    <p class="subtitle">From Gaussian Noise to Point Distributions</p>
+    <p class="meta">Braden Dougherty</p>
+
+    <div class="abstract">
+        <span class="label">Abstract</span>
+        This report documents a small flow-matching project on 2D point coordinates.
+        A velocity MLP is trained to transport standard Gaussian noise into a filled ring
+        and then into a procedurally generated letter B.
+        An animation visualizes the learned transport, Euler step counts are compared
+        with a fixed-grid histogram discrepancy, and one round of reflow is tested for
+        path straightening and few-step sample quality.
+    </div>
+
+    <h2>1. Objective and setup</h2>
+    <p>
+        The model operates on points $x\in\mathbb{R}^2$, not images.
+        Time follows the convention that $t=0$ is noise and $t=1$ is data.
+        Training uses randomly paired source and target samples with
+    </p>
+    $$
+    x_t=(1-t)x_0+t x_1,\qquad u=x_1-x_0,
+    $$
+    <p>
+        and a velocity network $v_\theta(x_t,t)\in\mathbb{R}^2$ trained by mean squared error
+        against $u$.
+        Sampling uses forward Euler from fresh Gaussian draws without supplying endpoints.
+    </p>
+
+    <h2>2. Part 1: Learn a 2D flow from scratch</h2>
+
+    <h3>2.1 Source, target, and training pairs</h3>
+    <p>
+        Source points are $x_0\sim\mathcal{N}(0,I_2)$.
+        The target is a filled annulus (ring) with inner radius $0.7$ and outer radius $1.5$.
+        Angles are uniform on $[0,2\pi)$ and radii are area-uniform,
+        $r=\sqrt{U[r_{\mathrm{inner}}^2,r_{\mathrm{outer}}^2]}$, so points lie in about $[-1.5,1.5]^2$.
+    </p>
+    <p>
+        Figure 1 shows the two clouds.
+        Figure 2 shows randomly paired straight interpolants.
+        Along each such path the training velocity $u=x_1-x_0$ does not depend on $t$,
+        so it is constant; equivalently, $\mathrm{d}x_t/\mathrm{d}t=u$.
+    </p>
+
+    <figure>
+        <img src="figures/p1_source_target.png" alt="Source Gaussian and filled-ring target" />
+        <figcaption>Figure 1. Part 1 source Gaussian and filled-ring target.</figcaption>
+    </figure>
+
+    <figure class="half">
+        <img src="figures/p1_interp_paths.png" alt="Straight training interpolants" />
+        <figcaption>Figure 2. Straight training interpolants between random pairs.</figcaption>
+    </figure>
+
+    <h3>2.2 Velocity model and training</h3>
+    <p>
+        The network is a 3-layer MLP with width 128 and SiLU activations.
+        Inputs are $(x,y,t)$; outputs are a 2D velocity.
+        Training used Adam ($10^{-3}$), batch size 4096, and 2500 online steps on CPU.
+        Figure 3 shows the loss curve.
+        The objective predicts velocity, not the endpoint.
+        Because pairs are random, many incompatible velocities are associated with the same
+        location, so the loss need not approach zero.
+    </p>
+
+    <figure class="narrow">
+        <img src="figures/p1_loss.png" alt="Part 1 training loss" />
+        <figcaption>Figure 3. Part 1 training loss (log scale).</figcaption>
+    </figure>
+
+    <h3>2.3 Generation and the learned field</h3>
+    <p>
+        Fresh Gaussian samples were integrated with 50 Euler steps.
+        Figure 4 shows the cloud at several times, and
+        Figure 5 shows the velocity field at $t\in\{0,0.5,1\}$.
+        Figure 6 shows learned trajectories, which can bend:
+        straight training paths do not force straight sampling paths.
+    </p>
+
+    <figure>
+        <img src="figures/p1_clouds_over_time.png" alt="Generated clouds over time" />
+        <figcaption>Figure 4. Generated point clouds along the learned flow.</figcaption>
+    </figure>
+
+    <figure>
+        <div class="row">
+            <img src="figures/p1_field_t0.png" alt="Velocity field at t=0" />
+            <img src="figures/p1_field_t05.png" alt="Velocity field at t=0.5" />
+            <img src="figures/p1_field_t1.png" alt="Velocity field at t=1" />
+        </div>
+        <figcaption>Figure 5. Learned velocity fields at selected times.</figcaption>
+    </figure>
+
+    <figure class="half">
+        <img src="figures/p1_learned_paths.png" alt="Learned Euler trajectories" />
+        <figcaption>Figure 6. Euler trajectories under the learned field.</figcaption>
+    </figure>
+
+    <h2>3. Part 2: Letter-B demo and sampling trade-off</h2>
+
+    <h3>3.1 Creative target</h3>
+    <p>
+        The target is a capital letter B generated with matplotlib <code>TextPath</code>
+        (DejaVu Sans Bold).
+        No external image is used; the glyph is original project geometry produced in code.
+        The outline is rasterized once to a fine mask, and points are sampled uniformly from
+        occupied pixels with small continuous jitter, scaled into a roughly width-$2.2$ box.
+    </p>
+
+    <figure>
+        <img src="figures/p2_source_target_B.png" alt="Source Gaussian and letter B target" />
+        <figcaption>Figure 7. Source Gaussian and letter-B target.</figcaption>
+    </figure>
+
+    <p>
+        A model of the same architecture was trained for 3500 steps on this target
+        (Figure 8).
+    </p>
+
+    <figure class="narrow">
+        <img src="figures/p2_loss.png" alt="Part 2 training loss" />
+        <figcaption>Figure 8. Part 2 training loss.</figcaption>
+    </figure>
+
+    <h3>3.2 Animation and color</h3>
+    <p>
+        The same particles were tracked for 40 Euler steps.
+        Each particle is colored by a normalized function of its initial source
+        $x$-coordinate and that color is held fixed along the path.
+        Color is visualization only; the network predicts coordinate velocities and never
+        receives RGB.
+        Representative stills appear in Figure 9, and Figure 10 shows the animated transport.
+    </p>
+
+    <figure>
+        <img src="figures/p2_still_frames.png" alt="Letter B transport still frames" />
+        <figcaption>Figure 9. Letter-B transport stills with source-coordinate coloring.</figcaption>
+    </figure>
+
+    <figure>
+        <img src="figures/letter_b_transport.gif" alt="Animated letter B transport" style="max-width: 70%;" />
+        <figcaption>Figure 10. Animation of noise transported into the letter B.</figcaption>
+    </figure>
+
+    <h3>3.3 Euler step trade-off</h3>
+    <p>
+        With fixed weights and fixed initial Gaussians, step counts
+        $N\in\{1,5,10,25,50\}$ were compared.
+        Quality is a fixed $40\times 40$ histogram L1 discrepancy against independent
+        letter-B samples on $[-2.5,2.5]^2$, including out-of-range mass (none observed here).
+        Sampling time excludes rendering; NFE equals $N$.
+    </p>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+            <tr>
+                <th>$N$ (NFE)</th>
+                <th>time (s)</th>
+                <th>hist L1</th>
+                <th>hist L2</th>
+                <th>outside</th>
+            </tr>
+            </thead>
+            <tbody>
+            <tr><td>1</td><td>0.006</td><td>1.936</td><td>0.634</td><td>0.000</td></tr>
+            <tr><td>5</td><td>0.017</td><td>0.625</td><td>0.047</td><td>0.000</td></tr>
+            <tr><td>10</td><td>0.022</td><td>0.428</td><td>0.032</td><td>0.000</td></tr>
+            <tr><td>25</td><td>0.040</td><td>0.357</td><td>0.028</td><td>0.000</td></tr>
+            <tr><td>50</td><td>0.092</td><td>0.351</td><td>0.027</td><td>0.000</td></tr>
+            </tbody>
+        </table>
+        <p class="table-caption">Table 1. Part 2 step study (fixed $z_0$ and weights).</p>
+    </div>
+
+    <figure>
+        <img src="figures/p2_step_clouds.png" alt="Final clouds vs Euler steps" />
+        <figcaption>Figure 11. Final clouds for increasing Euler step counts.</figcaption>
+    </figure>
+
+    <figure>
+        <img src="figures/p2_step_tradeoff.png" alt="Quality and cost versus steps" />
+        <figcaption>Figure 12. Histogram discrepancy and sampling time versus step count.</figcaption>
+    </figure>
+
+    <p>
+        With one step the cloud is badly misplaced.
+        Quality improves quickly through about 10-25 steps and then plateaus near L1$\approx 0.35$.
+        Additional steps mainly buy integrator accuracy; the remaining gap is better attributed
+        to the learned field and the discrete glyph representation than to Euler error alone.
+    </p>
+
+    <h2>4. Part 3: Does reflow straighten the paths?</h2>
+
+    <h3>4.1 Hypothesis</h3>
+    <p>
+        One round of reflow (training a second velocity model on straight interpolations
+        between Gaussian sources and the baseline model's own generated endpoints) yields
+        straighter sampling trajectories and preserves letter-B quality at fewer Euler steps
+        than the baseline.
+    </p>
+
+    <h3>4.2 Reflow dataset and models</h3>
+    <p>
+        The Part 2 baseline was frozen.
+        Twenty thousand Gaussian sources were integrated with 100 Euler steps, and each
+        source was saved with its own generated endpoint (no reshuffling; true B samples were
+        not used as endpoint shortcuts).
+        Pair generation took about $0.77$&nbsp;s.
+        A second MLP of identical architecture was trained on those pairs for 2500 steps
+        (two seeds; about $24$-$26$&nbsp;s each).
+        As a compute-matched control, the baseline was continued for 2500 additional
+        random-pair steps on the true letter-B objective (about $64$&nbsp;s).
+    </p>
+
+    <figure>
+        <img src="figures/p3_reflow_pairs.png" alt="Reflow source and endpoint pairs" />
+        <figcaption>Figure 13. Reflow sources and baseline-generated endpoints.</figcaption>
+    </figure>
+
+    <h3>4.3 Comparison</h3>
+    <p>
+        Held-out Gaussian starts were evaluated for baseline, reflow (seed 0), continued
+        training, and a second reflow seed.
+        Path straightness is mean trajectory length minus start-to-end chord length on a
+        common 50-step grid.
+    </p>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+            <tr>
+                <th>Model</th>
+                <th>$N$</th>
+                <th>hist L1</th>
+                <th>time (s)</th>
+                <th>NFE</th>
+            </tr>
+            </thead>
+            <tbody>
+            <tr><td>baseline</td><td>1</td><td>1.921</td><td>0.004</td><td>1</td></tr>
+            <tr><td>baseline</td><td>5</td><td>0.627</td><td>0.014</td><td>5</td></tr>
+            <tr><td>baseline</td><td>50</td><td>0.354</td><td>0.156</td><td>50</td></tr>
+            <tr><td>reflow</td><td>1</td><td>0.362</td><td>0.003</td><td>1</td></tr>
+            <tr><td>reflow</td><td>5</td><td>0.353</td><td>0.016</td><td>5</td></tr>
+            <tr><td>reflow</td><td>50</td><td>0.354</td><td>0.160</td><td>50</td></tr>
+            <tr><td>continued</td><td>1</td><td>1.918</td><td>0.004</td><td>1</td></tr>
+            <tr><td>continued</td><td>5</td><td>0.634</td><td>0.015</td><td>5</td></tr>
+            <tr><td>continued</td><td>50</td><td>0.335</td><td>0.155</td><td>50</td></tr>
+            </tbody>
+        </table>
+        <p class="table-caption">Table 2. Selected quality and cost results on held-out starts.</p>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+            <tr>
+                <th>Model</th>
+                <th>mean excess</th>
+                <th>mean path</th>
+                <th>mean chord</th>
+            </tr>
+            </thead>
+            <tbody>
+            <tr><td>baseline</td><td>0.2584</td><td>0.795</td><td>0.537</td></tr>
+            <tr><td>reflow</td><td>0.0001</td><td>0.530</td><td>0.530</td></tr>
+            <tr><td>continued</td><td>0.2465</td><td>0.789</td><td>0.542</td></tr>
+            <tr><td>reflow seed 1</td><td>0.0001</td><td>0.529</td><td>0.529</td></tr>
+            </tbody>
+        </table>
+        <p class="table-caption">Table 3. Path straightness on a 50-step Euler grid.</p>
+    </div>
+
+    <figure>
+        <img src="figures/p3_compare_metrics.png" alt="Comparison metrics across models" />
+        <figcaption>Figure 14. Quality, inference cost, and straightness across models.</figcaption>
+    </figure>
+
+    <figure>
+        <img src="figures/p3_trajectories.png" alt="Sampling trajectories comparison" />
+        <figcaption>Figure 15. Sampling trajectories for baseline, reflow, and continued training.</figcaption>
+    </figure>
+
+    <figure>
+        <img src="figures/p3_final_clouds.png" alt="Final clouds at N=5 and N=50" />
+        <figcaption>Figure 16. Final clouds at $N=5$ and $N=50$.</figcaption>
+    </figure>
+
+    <h3>4.4 What the evidence supports</h3>
+    <p>The hypothesis is partially supported.</p>
+    <p>
+        Reflow strongly straightens paths: mean excess length falls from about $0.26$
+        (baseline and continued) to about $10^{-4}$ for both reflow seeds.
+        Few-step distribution quality also improves sharply: at $N=1$, reflow L1 is about
+        $0.36$ versus about $1.92$ for baseline and continued training; at $N=5$, reflow
+        already matches the baseline's fine-grid quality.
+        At large $N$, baseline, reflow, and continued training reach similar histogram L1
+        near $0.33$-$0.35$, consistent with reflow inheriting baseline endpoint error
+        rather than discovering a better target distribution.
+    </p>
+    <p>
+        The continued-training control did not straighten paths and did not match reflow's
+        one-step quality, so the few-step gains are not explained by ordinary extra
+        optimization alone.
+        Extra costs outside inference include pair generation ($\approx 0.8$&nbsp;s) and reflow
+        training ($\approx 25$&nbsp;s per seed).
+        Conclusions are limited to this architecture, letter-B target, and two reflow seeds.
+    </p>
+
+    <h2>5. Conclusion</h2>
+    <p>
+        A small MLP can learn a visible 2D flow from Gaussian noise to both a ring and a
+        letter B.
+        Animation and velocity-field plots make the transport interpretable.
+        More Euler steps reduce numerical error up to a plateau set by the learned field.
+        One round of reflow rectifies trajectories and improves few-step samples while
+        preserving fine-grid quality near the baseline's endpoint distribution.
+    </p>
+</main>
+</body>
+</html>
